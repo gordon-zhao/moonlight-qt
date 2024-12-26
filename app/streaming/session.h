@@ -242,6 +242,7 @@ private:
 
     StreamingPreferences* m_Preferences;
     bool m_IsFullScreen;
+    bool m_IsExclusiveFullScreen;
     SupportedVideoFormatList m_SupportedVideoFormats; // Sorted in order of descending priority
     STREAM_CONFIGURATION m_StreamConfig;
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;

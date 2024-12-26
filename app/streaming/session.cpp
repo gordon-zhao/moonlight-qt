@@ -540,6 +540,7 @@ bool Session::populateDecoderProperties(SDL_Window* window)
 Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
     : m_Preferences(preferences ? preferences : StreamingPreferences::get()),
       m_IsFullScreen(m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED || !WMUtils::isRunningDesktopEnvironment()),
+      m_IsExclusiveFullScreen(m_Preferences->windowMode == StreamingPreferences::WM_FULLSCREEN),
       m_Computer(computer),
       m_App(app),
       m_Window(nullptr),
@@ -857,17 +858,7 @@ bool Session::initialize()
         }
         // Fall-through
     case StreamingPreferences::WM_FULLSCREEN:
-#ifdef Q_OS_DARWIN
-        if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
-            // Don't use "real" fullscreen on macOS by default. See comments above.
-            m_FullScreenFlag = SDL_WINDOW_FULLSCREEN_DESKTOP;
-        }
-        else {
             m_FullScreenFlag = SDL_WINDOW_FULLSCREEN;
-        }
-#else
-        m_FullScreenFlag = SDL_WINDOW_FULLSCREEN;
-#endif
         break;
     }
 
@@ -1441,6 +1432,11 @@ void Session::toggleFullscreen()
 {
     bool fullScreen = !(SDL_GetWindowFlags(m_Window) & m_FullScreenFlag);
 
+#ifdef Q_OS_DARWIN
+    // Resize from windowed/boarderless mode to exclusive full screen mode
+    if (m_IsExclusiveFullScreen) fullScreen = (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != SDL_WINDOW_FULLSCREEN;
+#endif
+
 #if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN)
     // Destroy the video decoder before toggling full-screen because D3D9 can try
     // to put the window back into full-screen before we've managed to destroy
@@ -1457,7 +1453,17 @@ void Session::toggleFullscreen()
 #endif
 
     // Actually enter/leave fullscreen
-    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
+    if (SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0) != 0) {
+        // In MacOS, we cannot set exclusive full screen mode from boarderless mode for unknown reason
+        // Try setting back to windowed mode
+        SDL_SetWindowFullscreen(m_Window, 0);
+        if (SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0) != 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_SetWindowFullscreen failed: %s",
+                    SDL_GetError());
+            return;
+        }
+    }
 
 #ifdef Q_OS_DARWIN
     // SDL on macOS has a bug that causes the window size to be reset to crazy
@@ -1795,6 +1801,11 @@ void Session::execInternal()
 
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+#ifdef Q_OS_DARWIN
+    // For some reason, an exclusive full screen window cannot be resizable,
+    // or the drawable size won't change after setting to full screen.
+    if (m_IsExclusiveFullScreen) defaultWindowFlags &= ~SDL_WINDOW_RESIZABLE;
+#endif
 
     // If we're starting in windowed mode and the Moonlight GUI is maximized or
     // minimized, match that with the streaming window.
@@ -2054,6 +2065,14 @@ void Session::execInternal()
                     m_AudioMuted = true;
                 }
                 m_InputHandler->notifyFocusLost();
+#ifdef Q_OS_DARWIN
+                // Switch back to boarderless mode to allow for desktop switch & screen lock
+                if (m_IsExclusiveFullScreen&&
+                    m_Window && 
+                    (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
+                    SDL_SetWindowFullscreen(m_Window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+                }
+#endif
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
                 if (m_Preferences->muteOnFocusLoss) {
